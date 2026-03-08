@@ -26,26 +26,38 @@ app.get('/api/status', (req, res) => {
 
 // System prompt — very strict to prevent hallucinated tools and multi-calls
 const getSystemPrompt = () => `You are Kyrax, a helpful AI assistant on a Windows PC. Be concise.
-Current time: ${new Date().toLocaleString('en-IN')}
+Current time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+User timezone: Asia/Kolkata (IST, UTC+5:30)
 
 TOOL RULES (follow strictly):
-1. You ONLY have these tools: open_website, open_application, close_application, close_specific_tab, set_volume, get_system_info, send_whatsapp_message, spotify_control, list_directory, manage_files.
+1. You ONLY have these tools: open_website, open_application, close_application, close_specific_tab, set_volume, get_system_info, send_whatsapp_message, phone_call, spotify_control, n8n_agent, list_directory, manage_files.
 2. NEVER invent or call any tool not in the list above. If you cannot do something with these tools, just say so in text.
 3. Call ONLY ONE tool per user request unless the request explicitly asks for multiple separate actions.
 4. For "open YouTube and search X": call open_website ONCE with https://www.youtube.com/results?search_query=X (URL-encoded). Do NOT also open youtube.com separately.
 5. For "open Chrome and search X" or "search X on Google": call open_website ONCE with https://www.google.com/search?q=X.
 6. For "open YouTube" (no search): call open_website ONCE with https://www.youtube.com.
-7. For "open [app]" (not a website): call open_application with the app name.
+7. For "open [app]" (not a website): ALWAYS call open_application. This works for ANY Windows app including Camera, Calculator, Instagram, Paint, Settings, File Explorer, CapCut, Notepad, VS Code, etc. NEVER say you cannot open an app — just try open_application with the app name.
 8. For "close [app]": call close_application.
 9. For "close [website] tab" (e.g. "close YouTube"): call close_specific_tab with the target_phrase (e.g. "YouTube"). Do NOT call close_application for websites/tabs.
 10. For volume controls (e.g., "set volume to 30", "half volume", "mute"): call set_volume.
 11. To check laptop/PC specs, configuration, RAM, CPU, or OS: call get_system_info.
-12. For ANY Spotify request: call spotify_control. Use action="open" to just open Spotify, action="search" with a query to search, action="play" with a query to play a song/artist/playlist. NEVER use open_website or open_application for Spotify.
+12. For ANY Spotify request: call spotify_control. If user says "play X" or "open Spotify and play X", use action="play" with a query (this will auto-click play for them). Use action="search" ONLY if user explicitly says "search". Use action="open" to just open Spotify. NEVER use open_website or open_application for Spotify.
 13. For directory questions: call list_directory.
 14. For file/folder creation: call manage_files.
-15. For WhatsApp: call send_whatsapp_message.
-16. For normal questions (no action needed): just answer in text. Do NOT call any tool.
-17. After a tool executes and returns a result, summarize what happened in 1-2 short sentences. Do NOT call additional tools unless asked.`;
+15. For WhatsApp messages: call send_whatsapp_message.
+16. If the user asks you to "Call [Name]" or make a voice call, ALWAYS use phone_call. If the user says "Call X and tell them Y" or "Call X and say Y", pass the message as the "message" parameter — Kyrax will speak it out loud through the laptop speaker after the call connects.
+17. For ANY of these: calendar/scheduling, email (read/send/summarize), tasks/to-dos, notes, expenses/budgeting, web search for current info, or calculations — ALWAYS use n8n_agent. Pass the user's full natural language request as the message. CRITICAL: Always append "Use timezone Asia/Kolkata (IST, UTC+5:30) for all dates and times." at the end of the message you send to n8n_agent. The n8n agent has access to Google Calendar, Gmail, Google Tasks, Google Docs, Google Sheets, SerpAPI web search, and Calculator.
+18. For normal questions (no action needed): just answer in text. Do NOT call any tool.
+19. After a tool executes and returns a result, summarize what happened in 1-2 short sentences. Do NOT call additional tools unless asked.`;
+
+let conversationHistory = [];
+
+// Reset endpoint — clears conversation history to prevent hallucination loops
+app.post('/api/reset', (req, res) => {
+  conversationHistory = [];
+  console.log('[Kyrax] 🧹 Conversation history cleared.');
+  res.json({ status: 'ok', message: 'Neural memory purged.' });
+});
 
 app.post('/api/chat', async (req, res) => {
   try {
@@ -54,9 +66,13 @@ app.post('/api/chat', async (req, res) => {
 
     console.log(`\n[Kyrax] Received: "${message}"`);
 
+    conversationHistory.push({ role: 'user', content: message });
+    // Keep max 20 messages history
+    if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
+
     let messages = [
       { role: 'system', content: getSystemPrompt() },
-      { role: 'user', content: message }
+      ...conversationHistory
     ];
 
     let replyText = 'Done.';
@@ -132,6 +148,9 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+    // Update conversation history with all messages from this turn (excluding system prompt)
+    conversationHistory = messages.filter(m => m.role !== 'system');
+
     console.log(`[Kyrax] Reply: "${replyText?.substring(0, 120)}..."`);
 
     // ── Text to Speech via ElevenLabs ──
@@ -151,7 +170,8 @@ app.post('/api/chat', async (req, res) => {
               'Content-Type': 'application/json',
               'Accept': 'audio/mpeg'
             },
-            responseType: 'arraybuffer'
+            responseType: 'arraybuffer',
+            timeout: 5000 // Force 5s timeout so Kyrax never hangs
           }
         );
         audioBase64 = Buffer.from(ttsResponse.data, 'binary').toString('base64');

@@ -6,6 +6,7 @@ import PlasmaBlob from './components/blob';
 import BackgroundUI from './components/BackgroundUI';
 import Terminal from './components/Terminal';
 import Status from './components/Status';
+import About from './components/About';
 
 function App() {
   const [themeColor, setThemeColor] = useState('#8b5cf6'); // Default primary (violet)
@@ -57,6 +58,7 @@ function App() {
   };
 
   const [isDragging, setIsDragging] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
     // Update global CSS variables for the theme dynamically
@@ -76,6 +78,7 @@ function App() {
         isMovingStatus={isMovingStatus} setIsMovingStatus={setIsMovingStatus}
         saveStatusPosition={saveStatusPosition}
         isDragging={isDragging}
+        onOpenAbout={() => setShowAbout(true)}
       />
       
       {/* Minimal Sci-Fi Background UI */}
@@ -153,6 +156,13 @@ function App() {
         setMicrophonePermission={setMicrophonePermission}
         setApiConnected={setApiConnected}
         setTtsSpeaking={setTtsSpeaking}
+      />
+
+      {/* About Section Overlay */}
+      <About 
+        isOpen={showAbout} 
+        onClose={() => setShowAbout(false)} 
+        themeColor={themeColor} 
       />
     </div>
   );

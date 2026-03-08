@@ -5,6 +5,9 @@ const path = require('path');
 const os = require('os');
 const whatsappSkill = require('./whatsapp_skill');
 const spotifySkill = require('./spotify_skill');
+const axios = require('axios');
+
+const N8N_WEBHOOK_URL = 'http://localhost:5678/webhook/f72139ba-74b2-4eae-a8ba-2312c4dc8d4f';
 
 // ── PowerShell Runner (writes script to temp file to avoid escaping nightmares) ──
 const runPS = (script) => {
@@ -64,7 +67,7 @@ const toolDefinitions = [
     type: 'function',
     function: {
       name: 'open_application',
-      description: 'Opens a Windows desktop app by searching Start Menu. Works for apps like CapCut, Chrome, WhatsApp, Notepad, VS Code, etc.',
+      description: 'Opens ANY Windows desktop or UWP app by searching Start Menu. Works for ALL apps including: Camera, Calculator, Instagram, CapCut, Chrome, WhatsApp, Notepad, VS Code, Paint, Settings, File Explorer, etc. Use this for ANY "open [app]" request that is not a website.',
       parameters: {
         type: 'object',
         properties: {
@@ -146,6 +149,21 @@ const toolDefinitions = [
   {
     type: 'function',
     function: {
+      name: 'phone_call',
+      description: 'Finds a contact by name in contacts.json and dials their phone number using the laptop\'s native phone dialer. Optionally speaks a voice message through the laptop speaker after the call connects (useful for automated messages).',
+      parameters: {
+        type: 'object',
+        properties: {
+          contact_name: { type: 'string', description: 'Contact name to call' },
+          message: { type: 'string', description: 'Optional voice message to speak out loud through the laptop speaker after the call connects. Leave empty for a normal call with no automated message.' }
+        },
+        required: ['contact_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_directory',
       description: 'Lists all files and folders in a directory and returns the count. Use "desktop" for Desktop, "current" for project root, or give absolute path.',
       parameters: {
@@ -185,6 +203,20 @@ const toolDefinitions = [
           query: { type: 'string', description: 'Song name, artist, or playlist to search/play. Required for search and play actions.' }
         },
         required: ['action']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'n8n_agent',
+      description: 'Forwards requests to the n8n AI Agent workflow which has access to: Google Calendar (create/view/list events), Gmail (read/send/summarize emails), Google Tasks (create/list/get/delete tasks), Google Docs (create/update/read notes), Google Sheets (log/track expenses), SerpAPI (web search for current info), and Calculator. Use this for ANY request involving: calendar/scheduling, email, tasks/to-dos, notes, expenses/budgeting, web search for current info, or calculations.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'The full natural language request to forward to the n8n agent. Be descriptive and include all details the user provided.' }
+        },
+        required: ['message']
       }
     }
   }
@@ -243,13 +275,16 @@ if ($procs) {
         targetLevel = Math.max(0, Math.min(100, targetLevel));
 
         const script = `
-$wshell = New-Object -ComObject wscript.shell
-# Spam volume down to guarantee we start at 0%
-for($i=0; $i -lt 50; $i++) { $wshell.SendKeys([char]174) }
-Start-Sleep -Milliseconds 100
-# Volume up increments by 2 each press
+Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+public class Audio {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}
+"@
+# 174 is VolDown, 175 is VolUp
+for($i=0; $i -lt 50; $i++) { [Audio]::keybd_event(174, 0, 0, 0) }
 $upCount = [math]::Round(${targetLevel} / 2)
-for($i=0; $i -lt $upCount; $i++) { $wshell.SendKeys([char]175) }
+for($i=0; $i -lt $upCount; $i++) { [Audio]::keybd_event(175, 0, 0, 0) }
 Write-Output "System volume set to ~${targetLevel}%"
 `;
         return runPS(script);
@@ -342,6 +377,45 @@ if (-not $found) { Write-Output "Could not find any open Chrome tab matching '${
         return await whatsappSkill.sendWhatsAppMessage(rawContact, msg);
       }
 
+      case 'phone_call': {
+        const contactData = whatsappSkill.resolveContactData(args.contact_name);
+        if (!contactData || !contactData.phone) {
+          return `Error: Could not find a saved phone number for "${args.contact_name}" in contacts.json. Please add their phone number first or provide the raw number.`;
+        }
+        try {
+          // Launch the native Windows dialer via tel: protocol
+          require('child_process').exec(`Start-Process "tel:${contactData.phone}"`, { shell: 'powershell.exe' });
+          
+          const voiceMessage = args.message;
+          if (voiceMessage && voiceMessage.trim()) {
+            // Wait for the call to connect, then speak the message via Windows TTS
+            const sanitizedMsg = voiceMessage.replace(/'/g, "''").replace(/"/g, '`"');
+            const ttsScript = `
+Start-Sleep -Seconds 15
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$synth.Rate = 0
+$synth.Volume = 100
+$synth.Speak('${sanitizedMsg}')
+$synth.Dispose()
+`;
+            // Run TTS in background (non-blocking) so the tool returns immediately
+            const tmpFile = path.join(os.tmpdir(), `kyrax_call_tts_${Date.now()}.ps1`);
+            fs.writeFileSync(tmpFile, ttsScript, 'utf-8');
+            require('child_process').exec(
+              `powershell -ExecutionPolicy Bypass -File "${tmpFile}"`,
+              { shell: 'powershell.exe', timeout: 60000 },
+              () => { try { fs.unlinkSync(tmpFile); } catch {} }
+            );
+            return `Dialing ${contactData.name || args.contact_name} at ${contactData.phone}. After the call connects (~15 seconds), Kyrax will speak the following message through the laptop speaker: "${voiceMessage}". Please keep your phone on speaker near the laptop.`;
+          }
+          
+          return `Dialing ${contactData.name || args.contact_name} at ${contactData.phone} using the laptop's native phone program.`;
+        } catch (e) {
+          return `Failed to initiate native call: ${e.message}`;
+        }
+      }
+
       case 'spotify_control': {
         const action = args.action;
         const query = args.query || '';
@@ -355,6 +429,23 @@ if (-not $found) { Write-Output "Could not find any open Chrome tab matching '${
             return await spotifySkill.playOnSpotify(query);
           default:
             return 'Unknown Spotify action. Use: open, search, or play.';
+        }
+      }
+
+      case 'n8n_agent': {
+        try {
+          console.log(`[n8n Agent] Forwarding to webhook: "${args.message.substring(0, 80)}..."`);
+          const response = await axios.post(N8N_WEBHOOK_URL, { message: args.message }, { timeout: 120000 });
+          // n8n returns array of results, grab the output
+          const data = response.data;
+          if (Array.isArray(data) && data.length > 0 && data[0].output) {
+            console.log(`[n8n Agent] ✅ Response received (${data[0].output.length} chars)`);
+            return data[0].output;
+          }
+          return typeof data === 'string' ? data : JSON.stringify(data);
+        } catch (e) {
+          console.error('[n8n Agent] Error:', e.message);
+          return `n8n workflow error: ${e.message}. Make sure n8n is running on localhost:5678.`;
         }
       }
 

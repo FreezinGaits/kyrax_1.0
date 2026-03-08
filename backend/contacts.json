@@ -12,16 +12,21 @@
   "Gautam Sharma": {
     "name": "Gautam Sharma",
     "whatsapp_name": "Gautam Sharma",
-    "source": "ui_auto_saved"
+    "phone": "+919780925649"
   },
-  "Mango": {
-    "name": "Mango",
-    "whatsapp_name": "Mango",
-    "source": "ui_auto_saved"
+  "Gorry": {
+    "name": "Gorry",
+    "whatsapp_name": "Gorry",
+    "phone": "+919592988152"
   },
   "Piyush": {
     "name": "Piyush",
     "whatsapp_name": "Piyush",
+    "source": "ui_auto_saved"
+  },
+  "test": {
+    "name": "test",
+    "whatsapp_name": "test",
     "source": "ui_auto_saved"
   }
 }

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Hexagon, Home, LayoutDashboard, Settings, Info, Sliders } from 'lucide-react';
+import { Hexagon, Home, LayoutDashboard, Settings, Info, Sliders, RotateCcw } from 'lucide-react';
 
 export default function Navbar({
   themeColor, setThemeColor,
@@ -11,9 +11,11 @@ export default function Navbar({
   saveBlobPosition,
   isMovingStatus, setIsMovingStatus,
   saveStatusPosition,
-  isDragging
+  isDragging,
+  onOpenAbout
 }) {
   const [showSettings, setShowSettings] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const colors = [
     { name: 'Violet', value: '#8b5cf6' },
@@ -46,11 +48,29 @@ export default function Navbar({
             <Settings size={18} strokeWidth={1.5} />
             <span>Settings</span>
           </a>
-          <a href="#about" className="nav-item">
+          <a href="#about" className="nav-item" onClick={(e) => { e.preventDefault(); onOpenAbout(); }}>
             <Info size={18} strokeWidth={1.5} />
             <span>About</span>
           </a>
         </div>
+
+        {/* Reset Button */}
+        <button
+          className={`reset-btn ${resetting ? 'resetting' : ''}`}
+          title="Reset Neural Memory"
+          onClick={async () => {
+            setResetting(true);
+            try {
+              await fetch('http://localhost:5000/api/reset', { method: 'POST' });
+            } catch (e) {
+              console.error('Reset failed:', e);
+            }
+            setTimeout(() => setResetting(false), 1200);
+          }}
+        >
+          <RotateCcw size={16} strokeWidth={2} className="reset-icon" />
+          <span>RESET</span>
+        </button>
 
         {/* Status Indicator */}
         <div className="navbar-status">

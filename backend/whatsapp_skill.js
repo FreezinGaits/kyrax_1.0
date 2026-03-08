@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const DATA_DIR = path.join(__dirname, '.wa_profile');
 const CONTACTS_FILE = path.join(__dirname, 'contacts.json');
@@ -30,24 +30,34 @@ function findChrome() {
   return found;
 }
 
+// ── Clean Zombie Chrome for this Profile ──
+function cleanZombies() {
+  const { execFileSync } = require('child_process');
+  try {
+    execFileSync('powershell', [
+      '-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -match '\\.wa_profile' } | Invoke-CimMethod -MethodName Terminate"
+    ], { stdio: 'ignore' });
+  } catch {}
+  try {
+    const lockFile = path.join(DATA_DIR, 'SingletonLock');
+    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+  } catch {}
+}
+
 // ── Launch or reuse browser + page ──
 async function ensureBrowser() {
-  // If browser died or was closed, reset
   if (browser) {
     try {
-      await browser.version(); // health check
+      await browser.version();
     } catch {
       browser = null;
-      page = null;
     }
   }
 
   if (!browser) {
     const chromePath = findChrome();
-
-    // Clean up stale lock file if previous run crashed
-    const lockFile = path.join(DATA_DIR, 'SingletonLock');
-    try { if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); } catch {}
+    cleanZombies();
 
     try {
       browser = await puppeteer.launch({
@@ -58,17 +68,9 @@ async function ensureBrowser() {
         defaultViewport: null,
       });
     } catch (launchErr) {
-      // If profile is locked, try connecting to existing Chrome via debugging port
       console.log('[WhatsApp Skill] Initial launch failed, retrying after cleanup...', launchErr.message);
-
-      // Force kill any zombie Chrome using our profile  
-      try {
-        const { execSync } = require('child_process');
-        execSync('taskkill /f /im chrome.exe /t', { stdio: 'ignore', timeout: 5000 });
-        await new Promise(r => setTimeout(r, 2000));
-      } catch {}
-
-      // Retry launch
+      cleanZombies();
+      await new Promise(r => setTimeout(r, 2000));
       browser = await puppeteer.launch({
         headless: false,
         executablePath: chromePath,
@@ -77,31 +79,31 @@ async function ensureBrowser() {
         defaultViewport: null,
       });
     }
-
-    const pages = await browser.pages();
-    page = pages[0];
   }
 
-  // Navigate to WhatsApp Web if not already there
-  const url = page.url();
-  if (!url.includes('web.whatsapp.com')) {
-    await page.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const pages = await browser.pages();
+  let targetPage = pages.find(p => p.url().includes('web.whatsapp.com'));
+
+  if (!targetPage) {
+    let emptyPage = pages.find(p => p.url() === 'about:blank' || p.url() === 'chrome://newtab/');
+    targetPage = emptyPage || await browser.newPage();
+    await targetPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } else {
+    try { await targetPage.bringToFront(); } catch {}
   }
 
-  // Wait for either the search box (logged in) or QR code
   console.log('[WhatsApp Skill] Waiting for WhatsApp Web to load...');
-  await page.waitForSelector(
+  await targetPage.waitForSelector(
     'div[aria-label="Search input textbox"], canvas[aria-label="Scan me!"]',
     { timeout: 60000 }
   );
 
-  // Check for QR code
-  const qr = await page.$('canvas[aria-label="Scan me!"]');
+  const qr = await targetPage.$('canvas[aria-label="Scan me!"]');
   if (qr) {
     throw new Error('WhatsApp requires QR login. Please scan the QR code in the browser window, then try again.');
   }
 
-  return page;
+  return targetPage;
 }
 
 // ── Contact Resolution with fuzzy matching ──
@@ -172,6 +174,54 @@ function resolveContact(rawName) {
   };
   fs.writeFileSync(CONTACTS_FILE, JSON.stringify(contacts, null, 2));
   return rawName;
+}
+
+function resolveContactData(rawName) {
+  let contacts = {};
+  if (fs.existsSync(CONTACTS_FILE)) {
+    try { contacts = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8')); } catch (e) { }
+  }
+
+  const query = rawName.toLowerCase().trim();
+  const queryWords = query.split(/\s+/);
+
+  for (const [key, val] of Object.entries(contacts)) {
+    if (key.toLowerCase() === query) return val;
+  }
+
+  const substringMatches = [];
+  for (const [key, val] of Object.entries(contacts)) {
+    const kLow = key.toLowerCase();
+    const wName = (typeof val === 'string' ? val : (val.whatsapp_name || val.name || key)).toLowerCase();
+    if (kLow.includes(query) || query.includes(kLow) || wName.includes(query) || query.includes(wName)) {
+      substringMatches.push({ key, val, score: 100 });
+    }
+  }
+  if (substringMatches.length === 1) return substringMatches[0].val;
+
+  const wordMatches = [];
+  for (const [key, val] of Object.entries(contacts)) {
+    const contactWords = key.toLowerCase().split(/\s+/);
+    const wName = (typeof val === 'string' ? val : (val.whatsapp_name || val.name || key)).toLowerCase();
+    const wNameWords = wName.split(/\s+/);
+    const allContactWords = [...new Set([...contactWords, ...wNameWords])];
+
+    let score = 0;
+    for (const qw of queryWords) {
+      for (const cw of allContactWords) {
+        if (cw === qw) { score += 10; break; }
+        if (cw.startsWith(qw) || qw.startsWith(cw)) { score += 5; break; }
+      }
+    }
+    if (score > 0) wordMatches.push({ key, val, score });
+  }
+
+  if (wordMatches.length > 0) {
+    wordMatches.sort((a, b) => b.score - a.score);
+    return wordMatches[0].val;
+  }
+
+  return null;
 }
 
 // ── Clear search box (mirroring Python's _clear_search) ──
@@ -327,15 +377,55 @@ async function sendWhatsAppMessage(contactQuery, messageText) {
   }
 }
 
+// ══════════════════════════════════════════════
+// ACTION: Make Audio Call
+// ══════════════════════════════════════════════
+async function callWhatsAppContact(contactQuery) {
+  const contactName = resolveContact(contactQuery);
+  console.log(`[WhatsApp Skill] Resolved "${contactQuery}" → "${contactName}" for calling`);
+
+  try {
+    const pg = await ensureBrowser();
+    const opened = await findAndOpenChat(pg, contactName);
+
+    if (!opened) {
+      return `Contact "${contactName}" was not found on WhatsApp to call.`;
+    }
+
+    // Try finding the Voice Call button
+    try {
+      const callBtn = await pg.waitForSelector(
+        'button span[data-icon="ic-audio-call"], button span[data-icon="wds-ic-audio-call"], div[title="Voice call"], button[aria-label="Voice call"], div[title="Audio call"], button[aria-label="Audio call"]',
+        { timeout: 7000 }
+      );
+      if (callBtn) {
+        // Try finding the closest button element to click, otherwise click the element itself
+        const btn = await callBtn.evaluateHandle(el => el.closest('button') || el.closest('div[role="button"]') || el);
+        await btn.click();
+        await new Promise(r => setTimeout(r, 2000));
+        return `Successfully initiated a voice call to ${contactName} on WhatsApp. (Note: Audio stream injection for TTS speaking is not supported by Google Chrome automatically, so you will need to speak into your microphone once they pick up).`;
+      }
+    } catch {
+      return `Opened chat for ${contactName}, but could not find the Audio Call button. (Note: WhatsApp Web may not have calling enabled for this particular contact/browser right now).`;
+    }
+
+    return `Failed to start call.`;
+  } catch (err) {
+    return `WhatsApp error: ${err.message}`;
+  }
+}
+
 async function closeWhatsApp() {
   if (browser) {
-    await browser.close();
+    try { await browser.close(); } catch {}
     browser = null;
-    page = null;
   }
 }
 
 module.exports = {
   sendWhatsAppMessage,
+  callWhatsAppContact,
   closeWhatsApp,
+  resolveContact, // exported for testing
+  resolveContactData
 };

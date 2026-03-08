@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const DATA_DIR = path.join(__dirname, '.spotify_profile');
 
@@ -29,6 +29,21 @@ function findChrome() {
   return found;
 }
 
+// ── Clean Zombie Chrome for this Profile ──
+function cleanZombies() {
+  const { execFileSync } = require('child_process');
+  try {
+    execFileSync('powershell', [
+      '-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -match '\\.spotify_profile' } | Invoke-CimMethod -MethodName Terminate"
+    ], { stdio: 'ignore' });
+  } catch {}
+  try {
+    const lockFile = path.join(DATA_DIR, 'SingletonLock');
+    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+  } catch {}
+}
+
 // ── Launch or reuse browser + page ──
 async function ensureBrowser() {
   if (browser) {
@@ -36,16 +51,12 @@ async function ensureBrowser() {
       await browser.version();
     } catch {
       browser = null;
-      page = null;
     }
   }
 
   if (!browser) {
     const chromePath = findChrome();
-
-    // Clean up stale lock file if previous run crashed
-    const lockFile = path.join(DATA_DIR, 'SingletonLock');
-    try { if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); } catch {}
+    cleanZombies();
 
     try {
       browser = await puppeteer.launch({
@@ -58,14 +69,8 @@ async function ensureBrowser() {
       });
     } catch (launchErr) {
       console.log('[Spotify Skill] Initial launch failed, retrying...', launchErr.message);
-      try {
-        const { execSync } = require('child_process');
-        // Only kill Chrome processes using our specific profile (not user's main Chrome)
-        const lockPath = path.join(DATA_DIR, 'SingletonLock');
-        try { if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath); } catch {}
-        await new Promise(r => setTimeout(r, 2000));
-      } catch {}
-
+      cleanZombies();
+      await new Promise(r => setTimeout(r, 2000));
       browser = await puppeteer.launch({
         headless: false,
         executablePath: chromePath,
@@ -75,32 +80,30 @@ async function ensureBrowser() {
         ignoreDefaultArgs: ['--enable-automation']
       });
     }
-
-    const pages = await browser.pages();
-    page = pages[0];
   }
 
-  return page;
-}
-
-// ── Ensure we're on Spotify Web Player ──
-async function ensureSpotifyLoaded() {
-  const pg = await ensureBrowser();
-
-  if (!pg.url().includes('open.spotify.com')) {
-    await pg.goto('https://open.spotify.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const pages = await browser.pages();
+  // Find an existing Spotify tab, or an empty tab to reuse
+  let targetPage = pages.find(p => p.url().includes('open.spotify.com'));
+  
+  if (!targetPage) {
+    let emptyPage = pages.find(p => p.url() === 'about:blank' || p.url() === 'chrome://newtab/');
+    targetPage = emptyPage || await browser.newPage();
+    await targetPage.goto('https://open.spotify.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } else {
+    try { await targetPage.bringToFront(); } catch {}
   }
 
   // Wait for the page to be reasonably loaded
   await new Promise(r => setTimeout(r, 2000));
 
   // Check if login is needed
-  const loginBtn = await pg.$('button[data-testid="login-button"]');
+  const loginBtn = await targetPage.$('button[data-testid="login-button"]');
   if (loginBtn) {
     throw new Error('Spotify requires login. A browser window has opened at open.spotify.com. Please log in first, then try again.');
   }
 
-  return pg;
+  return targetPage;
 }
 
 // ══════════════════════════════════════════════
@@ -108,7 +111,7 @@ async function ensureSpotifyLoaded() {
 // ══════════════════════════════════════════════
 async function openSpotify() {
   try {
-    const pg = await ensureSpotifyLoaded();
+    await ensureBrowser();
     console.log('[Spotify Skill] ✅ Spotify Web Player opened.');
     return 'Spotify Web Player is now open and ready.';
   } catch (err) {
@@ -122,7 +125,7 @@ async function openSpotify() {
 // ══════════════════════════════════════════════
 async function searchSpotify(query) {
   try {
-    const pg = await ensureSpotifyLoaded();
+    const pg = await ensureBrowser();
 
     // Navigate directly to search URL (most reliable)
     const searchUrl = `https://open.spotify.com/search/${encodeURIComponent(query)}`;
@@ -159,16 +162,38 @@ async function searchSpotify(query) {
 // ══════════════════════════════════════════════
 async function playOnSpotify(query) {
   try {
-    const pg = await ensureSpotifyLoaded();
+    const pg = await ensureBrowser();
+
+    // If no query is provided (e.g. "press play", "resume spotify")
+    if (!query || query.trim() === '') {
+      try {
+        const played = await pg.evaluate(() => {
+          const globalPlayBtn = document.querySelector('button[data-testid="control-button-playpause"]');
+          if (globalPlayBtn) {
+            globalPlayBtn.click();
+            return true;
+          }
+          return false;
+        });
+        if (played) return 'Toggled playback on Spotify.';
+      } catch (e) {}
+      return 'Could not find the global play/pause button on Spotify.';
+    }
 
     // Navigate directly to search
     const searchUrl = `https://open.spotify.com/search/${encodeURIComponent(query)}`;
     await pg.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await new Promise(r => setTimeout(r, 3000)); // wait for results
+    
+    // Wait specifically for the search results container instead of a hard sleep
+    try {
+      await pg.waitForSelector('main[aria-label="Spotify - Search"], div[data-testid="search-results"]', { timeout: 8000 });
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 4000)); // fallback sleep
+    }
 
     // Strategy 1: Click the big green play button on top result card
     try {
-      const topPlayBtn = await pg.$('[data-testid="top-result-card"] button[data-testid="play-button"]');
+      const topPlayBtn = await pg.$('div[data-testid="top-result-card"] button[data-testid="play-button"]');
       if (topPlayBtn) {
         await topPlayBtn.click();
         await new Promise(r => setTimeout(r, 1000));
@@ -177,43 +202,46 @@ async function playOnSpotify(query) {
       }
     } catch {}
 
-    // Strategy 2: Hover over first track row and click its play button
+    // Strategy 2: Click the first track's play button (can be hidden until hover, so we evaluate JS)
     try {
-      const firstRow = await pg.$('[data-testid="tracklist-row"], div[aria-rowindex="1"]');
-      if (firstRow) {
-        await firstRow.hover();
-        await new Promise(r => setTimeout(r, 500));
-        const playBtn = await firstRow.$('button[data-testid="play-button"], button[aria-label="Play"]');
-        if (playBtn) {
-          await playBtn.click();
-          await new Promise(r => setTimeout(r, 1000));
-          console.log('[Spotify Skill] ✅ Playing first track for:', query);
-          return `Now playing "${query}" on Spotify.`;
+      const played = await pg.evaluate(() => {
+        // EXCLUDE the global bottom player bar when searching!
+        const mainArea = document.querySelector('main') || document.body;
+        
+        // try finding ANY play button in a tracklist row
+        const playBtns = Array.from(mainArea.querySelectorAll('div[data-testid="tracklist-row"] button[aria-label*="Play"], div[data-testid="tracklist-row"] button[data-testid="play-button"]'));
+        if (playBtns.length > 0) {
+          playBtns[0].click();
+          return true;
         }
-      }
-    } catch {}
+        
+        // try selecting the first row and double clicking it
+        const firstRow = mainArea.querySelector('div[data-testid="tracklist-row"]');
+        if (firstRow) {
+          const event = new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window });
+          firstRow.dispatchEvent(event);
+          return true;
+        }
 
-    // Strategy 3: Click any visible play button on the page
-    try {
-      const anyPlay = await pg.$('button[data-testid="play-button"]');
-      if (anyPlay) {
-        await anyPlay.click();
+        // try the master Top Result play button again strictly inside main area
+        const topResultBtn = mainArea.querySelector('div[data-testid="top-result-card"] button, button[data-testid="play-button"]');
+        // Ensure it's not the global player play button
+        if (topResultBtn && !topResultBtn.closest('[data-testid="now-playing-bar"]')) {
+          topResultBtn.click();
+          return true;
+        }
+
+        return false;
+      });
+
+      if (played) {
         await new Promise(r => setTimeout(r, 1000));
-        console.log('[Spotify Skill] ✅ Playing via fallback button for:', query);
+        console.log('[Spotify Skill] ✅ Playing via JS evaluation for:', query);
         return `Now playing "${query}" on Spotify.`;
       }
-    } catch {}
-
-    // Strategy 4: Double-click the first track-row (usually starts playing it)
-    try {
-      const firstTrack = await pg.$('[data-testid="tracklist-row"]');
-      if (firstTrack) {
-        await firstTrack.click({ clickCount: 2 });
-        await new Promise(r => setTimeout(r, 1000));
-        console.log('[Spotify Skill] ✅ Double-clicked first track for:', query);
-        return `Now playing "${query}" on Spotify.`;
-      }
-    } catch {}
+    } catch (e) {
+      console.log('[Spotify Skill] JS eval failed:', e.message);
+    }
 
     return `Searched for "${query}" on Spotify but could not auto-play. Results are shown in the browser — please click a song to play.`;
   } catch (err) {
@@ -227,9 +255,8 @@ async function playOnSpotify(query) {
 // ══════════════════════════════════════════════
 async function closeSpotify() {
   if (browser) {
-    await browser.close();
+    try { await browser.close(); } catch {}
     browser = null;
-    page = null;
   }
 }
 
