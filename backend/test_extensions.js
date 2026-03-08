@@ -15,7 +15,7 @@ async function test(msg) {
         try {
           const json = JSON.parse(body);
           console.log(`\n✅ TEST: "${msg}"`);
-          console.log(`   REPLY: "${json.text?.substring(0, 200)}"`);
+          console.log(`   REPLY: "${json.text?.substring(0, 300)}"`);
           resolve(json);
         } catch(e) {
           console.log(`\n❌ PARSE ERROR for "${msg}": ${body.substring(0, 300)}`);
@@ -30,6 +30,5 @@ async function test(msg) {
 }
 
 (async () => {
-  await test('Tell me the configuration of my laptop');
-  await test('Close the YouTube tab');
+  await test('Jarvis open Spotify and play balachaur');
 })();

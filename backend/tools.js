@@ -3,6 +3,8 @@ const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const whatsappSkill = require('./whatsapp_skill');
+const spotifySkill = require('./spotify_skill');
 
 // ── PowerShell Runner (writes script to temp file to avoid escaping nightmares) ──
 const runPS = (script) => {
@@ -130,7 +132,7 @@ const toolDefinitions = [
     type: 'function',
     function: {
       name: 'send_whatsapp_message',
-      description: 'Opens WhatsApp Desktop, searches for a contact by name, and sends them a text message. IMPORTANT: You MUST have both the contact_name AND the message before calling this tool. If the user did not provide either the contact name or the message, DO NOT call this tool — instead ask the user to provide the missing information.',
+      description: 'Opens WhatsApp Web in Chrome, searches for a contact by name, and sends them a text message. IMPORTANT: You MUST have both the contact_name AND the message before calling this tool. If the user did not provide either the contact name or the message, DO NOT call this tool — instead ask the user to provide the missing information.',
       parameters: {
         type: 'object',
         properties: {
@@ -170,11 +172,26 @@ const toolDefinitions = [
         required: ['action', 'target_path']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spotify_control',
+      description: 'Controls Spotify Web Player. Actions: "open" (just opens Spotify), "search" (searches for a song/artist/playlist and returns results), "play" (searches and plays the top result). Use this for ANY Spotify-related request.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['open', 'search', 'play'], description: 'What to do: open, search, or play' },
+          query: { type: 'string', description: 'Song name, artist, or playlist to search/play. Required for search and play actions.' }
+        },
+        required: ['action']
+      }
+    }
   }
 ];
 
 // ── Tool Executor ──
-const executeTool = (name, args) => {
+const executeTool = async (name, args) => {
   console.log(`  [Tool Executor] ${name}`, JSON.stringify(args));
   try {
     switch (name) {
@@ -319,67 +336,26 @@ if (-not $found) { Write-Output "Could not find any open Chrome tab matching '${
       }
 
       case 'send_whatsapp_message': {
-        const contact = args.contact_name;
+        const rawContact = args.contact_name;
         const msg = args.message;
-        const script = `
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-}
-"@
+        
+        return await whatsappSkill.sendWhatsAppMessage(rawContact, msg);
+      }
 
-# 1. Open WhatsApp if not running
-$waProcess = Get-Process -Name 'WhatsApp' -ErrorAction SilentlyContinue
-if (-not $waProcess) {
-    $app = Get-StartApps | Where-Object { $_.Name -match 'WhatsApp' } | Select-Object -First 1
-    if (-not $app) { Write-Output "ERROR: WhatsApp not found on this PC."; exit 1 }
-    Start-Process "explorer.exe" "shell:AppsFolder\\$($app.AppID)"
-    Start-Sleep -Seconds 5
-    $waProcess = Get-Process -Name 'WhatsApp' -ErrorAction SilentlyContinue
-    if (-not $waProcess) { Write-Output "ERROR: WhatsApp failed to start."; exit 1 }
-}
-
-# 2. Bring WhatsApp window to front using Win32 API
-$hwnd = $waProcess[0].MainWindowHandle
-if ($hwnd -eq [IntPtr]::Zero) {
-    Start-Sleep -Seconds 2
-    $waProcess = Get-Process -Name 'WhatsApp' -ErrorAction SilentlyContinue
-    $hwnd = $waProcess[0].MainWindowHandle
-}
-[Win32]::ShowWindow($hwnd, 9) | Out-Null
-Start-Sleep -Milliseconds 300
-[Win32]::SetForegroundWindow($hwnd) | Out-Null
-Start-Sleep -Seconds 1
-
-# 3. Open search / new chat with Ctrl+F
-[System.Windows.Forms.SendKeys]::SendWait("^f")
-Start-Sleep -Milliseconds 1500
-
-# 4. Type the contact name
-[System.Windows.Forms.SendKeys]::SendWait("${contact}")
-Start-Sleep -Seconds 2
-
-# 5. Press Enter to select top result
-[System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-Start-Sleep -Seconds 1.5
-
-# 6. Type the message
-[System.Windows.Forms.SendKeys]::SendWait("${msg}")
-Start-Sleep -Milliseconds 800
-
-# 7. Press Enter to send
-[System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-Start-Sleep -Milliseconds 500
-
-Write-Output "Message sent to ${contact} on WhatsApp."
-`;
-        return runPS(script);
+      case 'spotify_control': {
+        const action = args.action;
+        const query = args.query || '';
+        
+        switch (action) {
+          case 'open':
+            return await spotifySkill.openSpotify();
+          case 'search':
+            return await spotifySkill.searchSpotify(query);
+          case 'play':
+            return await spotifySkill.playOnSpotify(query);
+          default:
+            return 'Unknown Spotify action. Use: open, search, or play.';
+        }
       }
 
       case 'list_directory': {

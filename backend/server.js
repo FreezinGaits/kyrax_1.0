@@ -29,7 +29,7 @@ const getSystemPrompt = () => `You are Kyrax, a helpful AI assistant on a Window
 Current time: ${new Date().toLocaleString('en-IN')}
 
 TOOL RULES (follow strictly):
-1. You ONLY have these tools: open_website, open_application, close_application, close_specific_tab, set_volume, get_system_info, send_whatsapp_message, list_directory, manage_files.
+1. You ONLY have these tools: open_website, open_application, close_application, close_specific_tab, set_volume, get_system_info, send_whatsapp_message, spotify_control, list_directory, manage_files.
 2. NEVER invent or call any tool not in the list above. If you cannot do something with these tools, just say so in text.
 3. Call ONLY ONE tool per user request unless the request explicitly asks for multiple separate actions.
 4. For "open YouTube and search X": call open_website ONCE with https://www.youtube.com/results?search_query=X (URL-encoded). Do NOT also open youtube.com separately.
@@ -40,11 +40,12 @@ TOOL RULES (follow strictly):
 9. For "close [website] tab" (e.g. "close YouTube"): call close_specific_tab with the target_phrase (e.g. "YouTube"). Do NOT call close_application for websites/tabs.
 10. For volume controls (e.g., "set volume to 30", "half volume", "mute"): call set_volume.
 11. To check laptop/PC specs, configuration, RAM, CPU, or OS: call get_system_info.
-12. For directory questions: call list_directory.
-13. For file/folder creation: call manage_files.
-14. For WhatsApp: call send_whatsapp_message.
-15. For normal questions (no action needed): just answer in text. Do NOT call any tool.
-16. After a tool executes and returns a result, summarize what happened in 1-2 short sentences. Do NOT call additional tools unless asked.`;
+12. For ANY Spotify request: call spotify_control. Use action="open" to just open Spotify, action="search" with a query to search, action="play" with a query to play a song/artist/playlist. NEVER use open_website or open_application for Spotify.
+13. For directory questions: call list_directory.
+14. For file/folder creation: call manage_files.
+15. For WhatsApp: call send_whatsapp_message.
+16. For normal questions (no action needed): just answer in text. Do NOT call any tool.
+17. After a tool executes and returns a result, summarize what happened in 1-2 short sentences. Do NOT call additional tools unless asked.`;
 
 app.post('/api/chat', async (req, res) => {
   try {
@@ -109,7 +110,7 @@ app.post('/api/chat', async (req, res) => {
             const fnName = toolCall.function.name;
             const args = JSON.parse(toolCall.function.arguments);
             console.log(`[Kyrax Tool] ${fnName}(${JSON.stringify(args)})`);
-            toolResult = executeTool(fnName, args);
+            toolResult = await executeTool(fnName, args);
             console.log(`[Kyrax Tool] Result: ${toolResult}`);
           } catch (e) {
             toolResult = `Error: ${e.message}`;

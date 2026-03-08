@@ -72,3 +72,7 @@ Thumbs.db
 # Ignored Scripts
 function_calling.py
 whatsapp_skill.py
+
+# Browser Automation Profiles
+backend/.wa_profile/
+backend/.spotify_profile/
