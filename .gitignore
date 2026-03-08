@@ -68,3 +68,7 @@ Thumbs.db
 
 # React specific
 /frontend/build/
+
+# Ignored Scripts
+function_calling.py
+whatsapp_skill.py
